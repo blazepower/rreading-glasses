@@ -86,12 +86,13 @@ func (s *slicebuffer[T]) len() int {
 // edgebuf collects and merges denormalization steps while still maintaining
 // serializability.
 type edgebuf struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	queue   []*edge
-	works   map[int64]*edge
-	authors map[int64]*edge
-	size    atomic.Int32
+	mu            sync.Mutex
+	cond          *sync.Cond
+	queue         []*edge
+	works         map[int64]*edge
+	authors       map[int64]*edge
+	size          atomic.Int32
+	onSizeChanged func(int)
 }
 
 // push enqueues the edge. If an edge of the same kind was already
@@ -132,10 +133,10 @@ func (b *edgebuf) push(e edge) {
 
 	if ok {
 		combined := union(existing.childIDs, e.childIDs)
-		b.size.Add(int32(len(combined) - len(existing.childIDs)))
+		b.addSize(int32(len(combined) - len(existing.childIDs)))
 		existing.childIDs = combined
 	} else {
-		b.size.Add(int32(len(e.childIDs)))
+		b.addSize(int32(len(e.childIDs)))
 		b.queue = append(b.queue, &e)
 	}
 	b.cond.Signal()
@@ -180,9 +181,17 @@ func (b *edgebuf) pop() edge {
 		panic("unrecognized edge kind")
 	}
 
-	b.size.Add(-int32(len(edge.childIDs)))
+	b.addSize(-int32(len(edge.childIDs)))
 
 	return *edge
+}
+
+// addSize publishes queue changes while mu is held, including the final dequeue.
+func (b *edgebuf) addSize(delta int32) {
+	size := b.size.Add(delta)
+	if b.onSizeChanged != nil {
+		b.onSizeChanged(int(size))
+	}
 }
 
 // len returns the number of children currently waiting in the buffer.

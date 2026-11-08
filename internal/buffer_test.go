@@ -90,3 +90,48 @@ func TestAccumulateSlice(t *testing.T) {
 	_, ok := <-consumer
 	assert.False(t, ok)
 }
+
+type diagnosticPopBuffer struct {
+	edgebuf
+	popStarted  chan struct{}
+	popAllowed  chan struct{}
+	popFinished chan struct{}
+}
+
+func (b *diagnosticPopBuffer) pop() edge {
+	close(b.popStarted)
+	<-b.popAllowed
+	e := b.edgebuf.pop()
+	close(b.popFinished)
+	return e
+}
+
+func TestAccumulatePublishesFinalQueueSize(t *testing.T) {
+	metrics := newControllerMetrics(nil)
+	buf := &diagnosticPopBuffer{
+		edgebuf:     edgebuf{onSizeChanged: metrics.denormWaitingSet},
+		popStarted:  make(chan struct{}),
+		popAllowed:  make(chan struct{}),
+		popFinished: make(chan struct{}),
+	}
+	producer := make(chan edge)
+	consumer := accumulate(producer, buf)
+
+	producer <- edge{kind: workEdge, parentID: 1, childIDs: newSet(int64(2))}
+	delivered := <-consumer
+	<-buf.popStarted
+
+	before := metrics.denormWaitingGet()
+	close(buf.popAllowed)
+	<-buf.popFinished
+
+	assert.Equal(t, int64(1), delivered.parentID)
+	assert.Equal(t, 0, buf.len())
+	assert.Equal(t, 1.0, before)
+	assert.Equal(t, 0.0, metrics.denormWaitingGet())
+	t.Logf("edge delivered; queue=%d, metric=%g after final dequeue", buf.len(), metrics.denormWaitingGet())
+
+	close(producer)
+	_, ok := <-consumer
+	assert.False(t, ok)
+}
